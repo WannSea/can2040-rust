@@ -1,7 +1,7 @@
 extern crate alloc;
 
 use alloc::fmt;
-use alloc::vec::Vec;
+use heapless::mpmc::MpMcQueue;
 use core::cell::RefCell;
 
 use cortex_m::asm::wfi;
@@ -169,13 +169,13 @@ impl embedded_can::Frame for CanFrame {
     }
 }
 
-static RECEIVE_QUEUE: Mutex<RefCell<Vec<CanFrame>>> = Mutex::new(RefCell::new(Vec::new()));
+static RECEIVE_QUEUE: Mutex<RefCell<MpMcQueue<CanFrame,128>>> = Mutex::new(RefCell::new(MpMcQueue::new()));
 
 unsafe extern "C" fn can2040_cb(_cd: *mut can2040, notify: u32, msg: *mut can2040_msg) {
     debug!("can2040_cb(), notify = {:x}, msg = {:?}", notify, *msg);
     if notify == CAN2040_NOTIFY_RX {
         cortex_m::interrupt::free(|cs| {
-            RECEIVE_QUEUE.borrow(cs).borrow_mut().push(CanFrame(*msg));
+            let _ = RECEIVE_QUEUE.borrow(cs).borrow_mut().enqueue(CanFrame(*msg));
         });
     }
     // TODO(zephyr): More code for TX / Err
@@ -204,12 +204,7 @@ impl embedded_can::nb::Can for Can2040 {
 
     fn receive(&mut self) -> nb::Result<Self::Frame, Self::Error> {
         cortex_m::interrupt::free(|cs| {
-            let mut queue = RECEIVE_QUEUE.borrow(cs).borrow_mut();
-            if queue.is_empty() {
-                Err(nb::Error::WouldBlock)
-            } else {
-                Ok(queue.remove(0))
-            }
+            RECEIVE_QUEUE.borrow(cs).borrow_mut().dequeue().ok_or(nb::Error::WouldBlock)
         })
     }
 }
@@ -235,12 +230,7 @@ impl embedded_can::blocking::Can for Can2040 {
     fn receive(&mut self) -> Result<Self::Frame, Self::Error> {
         loop {
             if let Some(received_msg) = cortex_m::interrupt::free(|cs| {
-                let mut queue = RECEIVE_QUEUE.borrow(cs).borrow_mut();
-                if !queue.is_empty() {
-                    Some(queue.remove(0))
-                } else {
-                    None
-                }
+                RECEIVE_QUEUE.borrow(cs).borrow_mut().dequeue()
             }) {
                 return Ok(received_msg);
             }
